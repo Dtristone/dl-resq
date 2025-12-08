@@ -360,6 +360,31 @@ def parser_gen():
         help="Disable R4 rotation (down_proj left side Hadamard)",
     )
     
+    parser.add_argument(
+        "--use_mxfp4",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use MXFP4 (Microscaling FP4) quantization instead of INT quantization",
+    )
+    parser.add_argument(
+        "--mxfp4_group_size",
+        type=int,
+        default=32,
+        help="Group size for MXFP4 quantization (default: 32)",
+    )
+    parser.add_argument(
+        "--mxfp4_stochastic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use stochastic rounding for MXFP4 quantization",
+    )
+    parser.add_argument(
+        "--mxfp4_targets",
+        type=str,
+        default="all",
+        help="Comma-separated list of modules to apply MXFP4 (e.g., 'q_proj,k_proj,v_proj' or 'all')",
+    )
+
     args, unknown = parser.parse_known_args()
 
     assert (

@@ -17,6 +17,12 @@ from train_utils.quant_linear import QuantizeLinear
 from utils import hadamard_utils
 from utils.utils import HadamardTransform
 
+try:
+    from utils.mxfp4_utils import MXFP4ActQuantizer, MXFP4WeightQuantizer, mxfp4_quantize
+    MXFP4_AVAILABLE = True
+except ImportError:
+    MXFP4_AVAILABLE = False
+
 
 def get_minq_maxq(bits, sym):
     if sym:
@@ -141,6 +147,10 @@ class ActQuantizer(torch.nn.Module):
         self.high_bits_length = 0
         self.low_bits_length = 0
         
+        # MXFP4 support
+        self.use_mxfp4 = False
+        self.mxfp4_group_size = 32
+        self.mxfp4_stochastic = False
 
     def free(self) -> None:
         self.zero = None
@@ -152,6 +162,10 @@ class ActQuantizer(torch.nn.Module):
 
     def forward(self, x):
         x_dtype = x.dtype
+
+        # MXFP4 quantization path
+        if self.use_mxfp4 and MXFP4_AVAILABLE:
+            return mxfp4_quantize(x, self.mxfp4_group_size, self.mxfp4_stochastic).to(x_dtype)
 
         if self.bits == 16:
             return x
@@ -222,6 +236,10 @@ class ActQuantizer(torch.nn.Module):
         high_bits: int = 16,
         low_bits_length: int = 0,
         low_bits: int = 16,
+        # MXFP4 parameters
+        use_mxfp4: bool = False,
+        mxfp4_group_size: int = 32,
+        mxfp4_stochastic: bool = False,
     ) -> None:
         _, self.maxq = get_minq_maxq(bits, sym)
         self.bits = bits
@@ -241,6 +259,14 @@ class ActQuantizer(torch.nn.Module):
         assert (
             self.clip_ratio <= 1 and self.clip_ratio > 0
         ), "Clip ratio should be in (0, 1]"
+
+        # MXFP4 configuration
+        self.use_mxfp4 = use_mxfp4
+        self.mxfp4_group_size = mxfp4_group_size
+        self.mxfp4_stochastic = mxfp4_stochastic
+        
+        if use_mxfp4:
+            self.bits = 4  # MXFP4 is effectively 4-bit
 
     def find_params_per_token_groupwise(self, x, maxq):
         xmax = torch.amax(x, dim=3, keepdim=True) * self.clip_ratio
