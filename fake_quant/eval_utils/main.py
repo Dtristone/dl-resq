@@ -19,35 +19,105 @@ from utils.hadamard_utils import (
 
 
 def ptq_model(args, model, model_args=None):
+    """
+    Apply Post-Training Quantization (PTQ) to the model.
+    
+    This is the CORE function that implements the ResQ quantization algorithm.
+    
+    ResQ Quantization Steps:
+    ========================
+    1. Rotation and Basis Transformation
+       - Fuse layer norms into adjacent layers
+       - Apply PCA basis transformation (U matrices)
+       - Apply random rotation (R matrices) to suppress outliers
+       - Rearrange columns to group high/low variance dimensions
+    
+    2. Weight Quantization
+       - GPTQ: Gradient-based PTQ with second-order information
+       - RTN: Simple round-to-nearest quantization
+    
+    3. Activation Quantization Configuration
+       - Mixed-precision: 8-bit for high-variance, 4-bit for mid, 2-bit for low
+       - Per-token or per-group quantization
+       - Different precision for different layers (v_proj, o_proj, down_proj, etc.)
+    
+    4. KV Cache Quantization
+       - Quantize Key and Value caches in attention
+       - Apply rotation after RoPE to suppress outliers
+    
+    Args:
+        args: PTQ configuration (bit widths, rotation mode, paths to basis/rotation)
+        model: The model to quantize
+        model_args: Additional model arguments
+    
+    Returns:
+        model: The quantized model with all transformations applied
+    
+    See PTQ_FLOW_DOCUMENTATION.md for detailed explanation.
+    """
     transformers.set_seed(args.seed)
     model.eval()
-    # Rotate the weights
+    
+    # ============================================================================
+    # STEP 1: Rotation and Basis Transformation
+    # ============================================================================
+    # Purpose: Transform model to a space where quantization errors are minimized
+    # Method: Apply PCA basis U and random rotation R such that:
+    #         - High-variance dims (outliers) are isolated
+    #         - Low-variance dims can be quantized aggressively
+    #         - Overall quantization error is minimized
     if not args.rotate_mode == "none":
+        # 1.1: Fuse layer normalization into adjacent linear layers
+        # This simplifies the model structure and makes rotation more effective
         fuse_norm_utils.fuse_layer_norms(model)
+        
         if args.rotate_mode == "resq" or args.rotate_mode == "quik":
+            # 1.2: Apply PCA basis transformation (U matrices)
+            # Loads pre-computed U matrices from optimized_basis_path
+            # Transforms weights: W' = W @ U
+            # This rotates activations into PCA eigenspace
             rotation_utils.fuse_basis_to_model(model, args)
         else:
+            # Alternative: Apply Hadamard or random rotation directly
             rotation_utils.rotate_model(model, args)
+        
         if args.rotate_mode == "resq" or args.rotate_mode == "quik":
+            # 1.3: Rearrange columns to group dimensions by variance
+            # New order: [low_variance | mid_variance | high_variance]
+            # This enables mixed-precision quantization
             rotation_utils.rearrange_columns(model, args, False)
 
         utils.cleanup_memory(verbos=True)
+        
+        # 1.4: Add activation quantization wrappers to all linear layers
         quant_utils.add_actquant(model)  # Add Activation Wrapper to the model
+        
+        # 1.5: Configure Hadamard transform for down_proj layers
+        # down_proj outputs have high outliers; Hadamard transform spreads them out
         qlayers = quant_utils.find_qlayers(model)
         for name in qlayers:
             if "down_proj" in name:
                 had_K, K = hadamard_utils.get_hadK(model.config.intermediate_size)
-                qlayers[name].online_full_had = True
+                qlayers[name].online_full_had = True  # Apply Hadamard during forward pass
                 qlayers[name].had_K = had_K
                 qlayers[name].K = K
                 qlayers[name].fp32_had = args.fp32_had
 
     else:
+        # No rotation mode: still add activation quantization wrappers
         quant_utils.add_actquant(
             model
         )  # Add Activation Wrapper to the model as the rest of the code assumes it is present
+    
+    # ============================================================================
+    # STEP 2: Weight Quantization
+    # ============================================================================
+    # Quantize model weights to low precision (e.g., 4-bit)
+    # Three options: Load pre-quantized, GPTQ, or RTN
     if args.w_bits < 16:
         save_dict = {}
+        
+        # Option A: Load pre-quantized model weights
         if args.load_qmodel_path:  # Load Quantized Rotated Model
             assert args.rotate, "Model should be rotated to load a quantized model!"
             assert (
@@ -57,7 +127,14 @@ def ptq_model(args, model, model_args=None):
             save_dict = torch.load(args.load_qmodel_path)
             model.load_state_dict(save_dict["model"])
 
+        # Option B: Apply GPTQ (Gradient-based Post-Training Quantization)
         elif not args.w_rtn:  # GPTQ Weight Quantization
+            # GPTQ uses second-order information (Hessian) to minimize quantization error
+            # Algorithm:
+            # 1. Collect activation statistics on calibration data (WikiText-2)
+            # 2. Compute Hessian: H = X^T @ X
+            # 3. Use Cholesky decomposition for block-wise quantization
+            # 4. Update remaining weights to compensate for quantization error
             trainloader = data_utils.get_wikitext2(
                 nsamples=args.nsamples,
                 seed=args.seed,
@@ -68,15 +145,27 @@ def ptq_model(args, model, model_args=None):
             quantizers = gptq_utils.gptq_fwrd(model, trainloader, "cuda", args)
             # quantizers = gptq_utils.lwc_fwrd(model, trainloader, "cuda", args)
             save_dict["w_quantizers"] = quantizers
+        
+        # Option C: Apply RTN (Round-To-Nearest)
         else:  # RTN Weight Quantization
+            # Simple quantization: scale = max(|W|) / (2^(bits-1) - 1)
+            # W_quant = round(W / scale) * scale
             quantizers = gptq_utils.rtn_fwrd(model, "cuda", args)
             save_dict["w_quantizers"] = quantizers
 
+        # Save quantized model if requested
         if args.save_qmodel_path:
             save_dict["model"] = model.state_dict()
             torch.save(save_dict, args.save_qmodel_path)
 
-    # Add Input Quantization
+    # ============================================================================
+    # STEP 3: Activation Quantization Configuration
+    # ============================================================================
+    # Configure mixed-precision quantization for activations
+    # ResQ uses different bit-widths for different variance regions:
+    # - High variance (outliers): 8-bit
+    # - Medium variance: 4-bit
+    # - Low variance: 2-bit (optional)
     if args.a_bits < 16 or args.v_bits < 16:
         qlayers = quant_utils.find_qlayers(model, layers=[quant_utils.ActQuantWrapper])
         down_proj_groupsize = -1
@@ -84,6 +173,11 @@ def ptq_model(args, model, model_args=None):
             down_proj_groupsize = utils.llama_down_proj_groupsize(
                 model, args.a_groupsize
             )
+        
+        # Calculate mixed-precision dimensions for ResQ/QuiK mode
+        # Example: hidden_dim=4096, high_fraction=0.125 (1/8)
+        # => high_bits_length = 512 (top 12.5% in 8-bit)
+        # => remaining 87.5% in 4-bit (or 2-bit for bottom dims)
         for name in qlayers:
             layer_input_bits = args.a_bits
             layer_groupsize = args.a_groupsize
@@ -95,19 +189,23 @@ def ptq_model(args, model, model_args=None):
             head_dim = model_dim // num_heads
             mlp_dim = model.config.intermediate_size
             v_groupsize = head_dim
+            
+            # Configure mixed-precision layout for ResQ/QuiK
             if args.rotate_mode == "resq" or args.rotate_mode == "quik":
-                high_bits_fraction = args.high_fraction
+                high_bits_fraction = args.high_fraction  # e.g., 0.125
                 high_bits_length = int(high_bits_fraction * model_dim)
-                low_bits_fraction = args.low_fraction
+                low_bits_fraction = args.low_fraction    # e.g., 0.0
                 low_bits_length = int(low_bits_fraction * model_dim)
 
             else:
+                # Uniform precision (no mixed precision)
                 high_bits_length = 0
                 low_bits_length = 0
 
+            # Configure v_proj (Value projection in attention)
             if "v_proj" in name and args.v_bits < 16:  # Set the v_proj precision
                 if args.rotate_mode == "resq" or args.rotate_mode == "quik":
-                    # per group residual
+                    # per group residual (mixed precision per attention head group)
                     v_high_bits_length = int(v_groupsize * high_bits_fraction)
                     v_low_bits_length = int(v_groupsize * low_bits_fraction)
                 else:
@@ -115,15 +213,17 @@ def ptq_model(args, model, model_args=None):
                     v_low_bits_length = 0
 
                 qlayers[name].out_quantizer.configure(
-                    bits=args.v_bits,
+                    bits=args.v_bits,              # e.g., 4-bit
                     groupsize=v_groupsize,
                     sym=not (args.v_asym),
                     clip_ratio=args.v_clip_ratio,
                     high_bits_length=v_high_bits_length,
-                    high_bits=args.high_bits,
+                    high_bits=args.high_bits,      # e.g., 8-bit
                     low_bits_length=v_low_bits_length,
-                    low_bits=args.low_bits,
+                    low_bits=args.low_bits,        # e.g., 2-bit
                 )
+            
+            # Configure o_proj (Output projection in attention)
             if "o_proj" in name:
                 layer_groupsize = head_dim
                 if args.rotate_mode == "resq" or args.rotate_mode == "quik":
@@ -131,21 +231,25 @@ def ptq_model(args, model, model_args=None):
                     high_bits_length = int(v_groupsize * high_bits_fraction)
                     low_bits_length = int(v_groupsize * low_bits_fraction)
 
+            # Skip quantization for lm_head (final output layer)
             if "lm_head" in name:  # Skip lm_head quantization
                 layer_input_bits = 16
                 high_bits_length = 0
                 low_bits_length = 0
 
+            # Always use 8-bit for basis_change layers
             if "basis_change" in name:
                 layer_input_bits = 8  #####
                 high_bits_length = 0
                 low_bits_length = 0
             
+            # Skip quantization for vision components (Qwen-2-VL)
             if "visual" in name: ###### Qwen-2-VL (vision part is not quantized)
                 layer_input_bits = 16
                 high_bits_length = 0
                 low_bits_length = 0
 
+            # Configure down_proj (MLP down projection)
             if "down_proj" in name:  # Set the down_proj precision
                 high_bits_length = 0
                 low_bits_length = 0
@@ -154,6 +258,7 @@ def ptq_model(args, model, model_args=None):
                 if args.int8_down_proj:
                     layer_input_bits = 8
 
+            # Apply configuration to the quantizer
             qlayers[name].quantizer.configure(
                 bits=layer_input_bits,
                 groupsize=layer_groupsize,
@@ -165,30 +270,43 @@ def ptq_model(args, model, model_args=None):
                 low_bits=args.low_bits,
             )
 
+    # ============================================================================
+    # STEP 4: KV Cache Quantization
+    # ============================================================================
+    # Quantize the Key cache in attention mechanism
+    # Value cache is already quantized via v_proj configuration above
     if args.k_bits < 16:
         if args.k_pre_rope:
             raise NotImplementedError("Pre-RoPE quantization is not supported yet!")
         else:
+            # Determine the RoPE function name based on model type
             if hasattr(model, "visual"):
                 rope_function_name = "apply_multimodal_rotary_pos_emb"
             else:
                 rope_function_name = "apply_rotary_pos_emb"
             
             layers = model.model.layers
+            
+            # Load rotation matrices for ResQ/QuiK mode
             if args.rotate_mode == "resq" or args.rotate_mode == "quik":
+                # Load pre-computed PCA basis for Key
                 U_cpk = torch.load(args.optimized_basis_path)
                 # residual_length_k = int(args.residual_fraction * head_dim)
+                
+                # Calculate mixed-precision dimensions for Key
                 high_bits_length = int(args.high_fraction * head_dim)
                 low_bits_length = int(args.low_fraction * head_dim)
             else:
+                # No mixed precision for uniform quantization
                 # residual_length_k = 0
                 high_bits_length = 0
                 low_bits_length = 0
 
+            # Key quantization configuration
             k_quant_config = {
-                "k_bits": args.k_bits,
-                "k_bits_high": args.high_bits,
-                "k_bits_low": args.low_bits,
+                "k_bits": args.k_bits,          # e.g., 4-bit
+                "k_bits_high": args.high_bits,  # e.g., 8-bit
+                "k_bits_low": args.low_bits,    # e.g., 2-bit
                 "k_groupsize": args.k_groupsize,
                 "k_sym": not (args.k_asym),
                 "k_clip_ratio": args.k_clip_ratio,
@@ -196,8 +314,10 @@ def ptq_model(args, model, model_args=None):
                 "low_bits_length": low_bits_length,
             }
 
+            # Apply Key quantization to each layer
             for idx, layer in enumerate(layers):
                 if args.rotate_mode == "resq" or args.rotate_mode == "quik":
+                    # Load optimized rotation matrices R
                     R_dict = torch.load(args.optimized_rotation_path)
                     R2_1 = R_dict["R2_1"].cuda().to(torch.float64)
                     R2_2 = R_dict["R2_2"].cuda().to(torch.float64)
@@ -205,16 +325,25 @@ def ptq_model(args, model, model_args=None):
                     R2_0 = R_dict["R2_0"]
                     if R2_0 is not None:
                         R2 = torch.block_diag(R2_0.cuda().to(torch.float64), R2)
+                    
+                    # Combine PCA basis U and rotation R
+                    # Final transformation: K' = K @ (U @ R)
                     k_rotation = U_cpk[f"layer.{idx}.self_attn.key_pos"].cuda()
                     k_rotation = torch.matmul(k_rotation, R2)
+                    
+                    # Quantize the rotation matrix itself to 8-bit to save memory
                     quantizer = quant_utils.WeightQuantizer()
                     quantizer.configure(8)
                     quantizer.find_params(k_rotation)
                     k_rotation = quantizer.quantize(k_rotation)
                     k_had = False
                 else:
+                    # Alternative: use Hadamard transform for rotation
                     k_rotation = None
                     k_had = True
+                
+                # Add rotation wrapper after RoPE in the forward pass
+                # Flow: K = X @ W_k -> RoPE(K) -> Rotate(K) -> Quantize(K)
                 rotation_utils.add_qk_rotation_wrapper_after_function_call_in_forward(
                     layer.self_attn,
                     rope_function_name,
