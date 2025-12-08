@@ -38,3 +38,31 @@ bash 0_get_basis.sh
 ```
 bash 2_eval_ptq.sh
 ```
+
+## Documentation
+
+For a detailed understanding of the ResQ PTQ (Post-Training Quantization) flow, please refer to the following documentation files in the `fake_quant/` directory:
+
+- **[PTQ_FLOW_DOCUMENTATION.md](fake_quant/PTQ_FLOW_DOCUMENTATION.md)** - Comprehensive explanation of the entire PTQ pipeline, including:
+  - High-level overview of the two-phase process (basis computation and quantization)
+  - Detailed breakdown of each step in `ptq.py` and `eval_utils/main.py`
+  - Explanation of mixed-precision quantization strategy
+  - GPTQ vs RTN weight quantization
+  - Activation and KV cache quantization details
+
+- **[PTQ_FLOW_DIAGRAM.md](fake_quant/PTQ_FLOW_DIAGRAM.md)** - Visual flow diagrams showing:
+  - Complete pipeline from preprocessing to evaluation
+  - Forward pass with and without quantization
+  - Mixed-precision dimension partitioning
+  - File structure and data flow
+  - Key algorithms (GPTQ, mixed-precision quantization)
+
+- **[QUICK_REFERENCE.md](fake_quant/QUICK_REFERENCE.md)** - Quick reference guide with:
+  - Quick start commands
+  - Important arguments and configuration presets
+  - Code entry points and flow
+  - Debugging tips and common issues
+  - Performance expectations
+
+These documents provide in-depth explanations of how ResQ works under the hood, making it easier to understand, modify, and extend the codebase.
+
