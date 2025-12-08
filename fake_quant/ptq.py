@@ -158,11 +158,32 @@ def get_pred(
 
 @torch.no_grad()
 def evaluate(model, tokenizer, args):
+    """
+    Evaluate the quantized model on multiple benchmarks.
+    
+    Evaluation Steps:
+    1. Perplexity on WikiText-2 (language modeling quality)
+    2. Downstream tasks via lm-eval-harness (MMLU, BoolQ, etc.)
+    3. Long-context tasks via LongBench (if specified)
+    
+    Args:
+        model: The quantized model
+        tokenizer: Tokenizer for the model
+        args: Evaluation arguments (tasks, batch size, etc.)
+    
+    Returns:
+        results: Dictionary containing evaluation metrics
+    """
     use_cache = model.config.use_cache
     model.config.use_cache = False
 
     results = {}
 
+    # ============================================================================
+    # Step 1: Evaluate Perplexity on WikiText-2
+    # ============================================================================
+    # Perplexity measures how well the model predicts the next token
+    # Lower perplexity = better language modeling
     testloader = data_utils.get_wikitext2(
         seed=args.seed,
         seqlen=2048,
@@ -176,7 +197,11 @@ def evaluate(model, tokenizer, args):
     model.config.use_cache = use_cache
 
 
+    # ============================================================================
+    # Step 2: Setup for multi-GPU evaluation if needed
+    # ============================================================================
     if args.multigpu:
+        # Distribute model layers across multiple GPUs
         map_layers_to_multi_gpus(model.model.layers)
         input_device = model.model.layers[0].device
         output_device = model.model.layers[-1].device
@@ -191,7 +216,13 @@ def evaluate(model, tokenizer, args):
     else:
         input_device = utils.DEV
         model.to(utils.DEV)
+    
+    # ============================================================================
+    # Step 3: Evaluate on downstream tasks using lm-eval-harness
+    # ============================================================================
+    # Tasks include: MMLU (knowledge), BoolQ (reasoning), HellaSwag (commonsense), etc.
     if args.tasks != "":
+        # Wrap model for lm-eval-harness
         if args.vision_lm:
             lm = HFMultimodalLM(pretrained=model, processor=tokenizer)
         else:
@@ -205,7 +236,10 @@ def evaluate(model, tokenizer, args):
         import datasets
         datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
 
+        # MMMU requires chat template, other tasks don't
         apply_chat_template = "mmmu" in args.tasks #Run MMMU separately because apply_chat_template is False for every other task.
+        
+        # Run evaluation on specified tasks
         t_results = evaluator.simple_evaluate(
             lm,
             tasks=args.tasks.split(","),
@@ -219,6 +253,10 @@ def evaluate(model, tokenizer, args):
         log.info(make_table(t_results))
         print(make_table(t_results))
 
+    # ============================================================================
+    # Step 4: Evaluate on LongBench tasks (long-context understanding)
+    # ============================================================================
+    # LongBench tests model's ability to handle long documents (up to 32K tokens)
     if args.long_bench_tasks != "":
         model2path = json.load(open("config_longbench/model2path.json", "r"))
         model2maxlen = json.load(open("config_longbench/model2maxlen.json", "r"))
@@ -289,27 +327,47 @@ def seed_everything(seed):
 
 
 def train() -> None:
+    """
+    Main entry point for Post-Training Quantization (PTQ) pipeline.
+    
+    PTQ Flow Overview:
+    1. Initialize distributed training environment
+    2. Load and configure the model
+    3. Apply quantization transformations via ptq_model()
+    4. Evaluate the quantized model
+    
+    For detailed PTQ flow documentation, see PTQ_FLOW_DOCUMENTATION.md
+    """
+    # Step 1: Initialize distributed training backend
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=8))
     model_args, training_args, ptq_args = process_args_ptq()
     local_rank = utils.get_local_rank()
 
     log.info("the rank is {}".format(local_rank))
     torch.distributed.barrier()
+    
+    # Step 2: Set random seeds for reproducibility
     seed_everything(ptq_args.seed)
+    
+    # Step 3: Load model configuration
     config = AutoConfig.from_pretrained(
         model_args.input_model,
     )
     
+    # Step 4: Configure flash attention if enabled (faster attention computation)
     if ptq_args.flash_attn:
         config._attn_implementation = "flash_attention_2"
     dtype = torch.bfloat16 if training_args.bf16 else torch.float16
 
-    # ResQ is not compatiable with tie_word_embeddings, clone lm_head from embed_tokens
+    # Step 5: Handle tied word embeddings
+    # ResQ is not compatible with tie_word_embeddings, we need separate lm_head weights
+    # to apply rotation transformations independently
     process_word_embeddings = False
     if config.tie_word_embeddings:
         config.tie_word_embeddings = False
         process_word_embeddings = True
     vision = False
+    # Step 6: Load the appropriate model architecture based on model name
     if "llama" in model_args.input_model.lower():
         model = LlamaForCausalLM.from_pretrained(
             pretrained_model_name_or_path=model_args.input_model,
@@ -323,6 +381,7 @@ def train() -> None:
             config=config,
         )
     elif "qwen2" in model_args.input_model.lower() and "vl" in model_args.input_model.lower():
+        # Vision-Language model (multimodal)
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path=model_args.input_model,
             torch_dtype=dtype,
@@ -330,12 +389,25 @@ def train() -> None:
         )
         vision = True
 
+    # Step 7: Clone embeddings to lm_head if they were tied
     if process_word_embeddings:
         model.lm_head.weight.data = model.model.embed_tokens.weight.data.clone()
 
+    # Step 8: Initialize basis_change matrices to identity
+    # These will be replaced with PCA basis matrices during ptq_model()
     for name, m in model.named_modules():
         if "basis_change" in name:
             m.weight.data.copy_(torch.eye(model.config.hidden_size))
+    
+    # ============================================================================
+    # CORE QUANTIZATION STEP: Apply PTQ transformations to the model
+    # ============================================================================
+    # This function performs:
+    # 1. Rotation and basis transformation (PCA + random rotation)
+    # 2. Weight quantization (GPTQ or RTN)
+    # 3. Activation quantization setup (mixed precision)
+    # 4. KV cache quantization setup
+    # See eval_utils/main.py:ptq_model() for detailed implementation
     model = ptq_model(ptq_args, model, model_args)
     print(model)
     model.seqlen = training_args.model_max_length
@@ -343,6 +415,8 @@ def train() -> None:
     if local_rank == 0:
         log.info("Model PTQ completed {}".format(model))
         log.info("Start to load tokenizer...")
+    
+    # Step 9: Load tokenizer or processor (for vision models)
     if vision:
         tokenizer = AutoProcessor.from_pretrained(model_args.input_model)
     else:
@@ -357,8 +431,15 @@ def train() -> None:
         )
     log.info("Complete tokenizer loading...")
 
+    # Step 10: Prepare for evaluation
     ptq_args.vision_lm = vision
     ptq_args.model_name = model_args.input_model.split('/')[-1]
+    
+    # Step 11: Evaluate the quantized model
+    # This includes:
+    # - Perplexity on WikiText-2
+    # - Accuracy on downstream tasks (MMLU, BoolQ, etc.)
+    # - Long-context tasks (LongBench) if specified
     results = evaluate(model, tokenizer, ptq_args)
     dist.barrier()
 
