@@ -1,0 +1,103 @@
+{
+    "description": "RESQ PTQ config - Only R1-related modules are rotated and quantized. R2 (V/O attn), R3 (K cache), R4 (down_proj left side) remain in high precision.",
+    
+    "rotation": {
+        "enable_R1": true,
+        "enable_R2": false,
+        "enable_R3": false,
+        "enable_R4": false,
+        "custom_R4_path": null
+    },
+    
+    "quantization": {
+        "q_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true,
+            "description": "R1-related: Input quantization for Q projection"
+        },
+        "k_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true,
+            "description": "R1-related: Input quantization for K projection"
+        },
+        "v_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true,
+            "output_quant_enabled": false,
+            "output_bits": 16,
+            "description": "R1-related input, R2-related output. Only input is quantized."
+        },
+        "o_proj": {
+            "enabled": false,
+            "bits": 16,
+            "groupsize": -1,
+            "asym": true,
+            "description": "R2-related: Keep in high precision (no quantization)"
+        },
+        "up_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true,
+            "description": "R1-related: Input quantization for UP projection"
+        },
+        "gate_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true,
+            "description": "R1-related: Input quantization for Gate projection"
+        },
+        "down_proj": {
+            "enabled": false,
+            "bits": 16,
+            "groupsize": -1,
+            "asym": true,
+            "left_side_high_bits": true,
+            "left_side_bits": 16,
+            "right_side_enabled": true,
+            "right_side_bits": 4,
+            "description": "R4-related left side (keep high precision), R1-related right side output"
+        },
+        "k_cache": {
+            "enabled": false,
+            "bits": 16,
+            "groupsize": -1,
+            "asym": true,
+            "description": "R3-related: Keep in high precision (no quantization)"
+        },
+        "v_cache": {
+            "enabled": false,
+            "bits": 16,
+            "groupsize": -1,
+            "asym": true,
+            "description": "R2-related: Keep in high precision (no quantization)"
+        },
+        "lm_head": {
+            "enabled": false,
+            "bits": 16
+        },
+        "embed_tokens": {
+            "enabled": false,
+            "bits": 16
+        }
+    },
+    
+    "mixed_precision": {
+        "high_bits": 8,
+        "low_bits": 2,
+        "high_fraction": 0.125,
+        "low_fraction": 0.0
+    },
+    
+    "online_hadamard": {
+        "down_proj": false,
+        "o_proj": false
+    }
+}

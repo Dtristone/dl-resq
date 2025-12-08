@@ -321,6 +321,45 @@ def parser_gen():
         default=False,
         help="Enable model parallelism using this flag. Map decoder blocks to different GPUs",
     )
+    
+    # Quantization Config Arguments
+    parser.add_argument(
+        "--quant_config_path",
+        type=str,
+        default=None,
+        help="Path to the JSON quantization config file for selective rotation/quantization control",
+    )
+    parser.add_argument(
+        "--use_r1_only_config",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use R1-only config: only rotate and quantize R1-related modules (q/k/v_proj inputs, up/gate_proj, down_proj output)",
+    )
+    parser.add_argument(
+        "--custom_r4_path",
+        type=str,
+        default=None,
+        help="Path to custom R4 rotation matrix for down_proj left side",
+    )
+    parser.add_argument(
+        "--disable_R2_rotation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Disable R2 rotation (V/O attention computation rotation)",
+    )
+    parser.add_argument(
+        "--disable_R3_rotation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Disable R3 rotation (K cache rotation)",
+    )
+    parser.add_argument(
+        "--disable_R4_rotation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Disable R4 rotation (down_proj left side Hadamard)",
+    )
+    
     args, unknown = parser.parse_known_args()
 
     assert (
@@ -350,5 +389,26 @@ def process_args_ptq():
 
     ptq_args.bsz = training_args.per_device_eval_batch_size
     ptq_args.output_dir = training_args.output_dir
+
+    # Load quantization config if provided
+    from utils.quant_config_utils import load_quant_config, create_r1_only_config
+    
+    if ptq_args.use_r1_only_config:
+        ptq_args.quant_config = create_r1_only_config()
+    elif ptq_args.quant_config_path is not None:
+        ptq_args.quant_config = load_quant_config(ptq_args.quant_config_path)
+    else:
+        ptq_args.quant_config = None
+    
+    # Apply command-line overrides for rotation control
+    if ptq_args.quant_config is not None:
+        if ptq_args.disable_R2_rotation:
+            ptq_args.quant_config.rotation.enable_R2 = False
+        if ptq_args.disable_R3_rotation:
+            ptq_args.quant_config.rotation.enable_R3 = False
+        if ptq_args.disable_R4_rotation:
+            ptq_args.quant_config.rotation.enable_R4 = False
+        if ptq_args.custom_r4_path is not None:
+            ptq_args.quant_config.rotation.custom_R4_path = ptq_args.custom_r4_path
 
     return model_args, training_args, ptq_args

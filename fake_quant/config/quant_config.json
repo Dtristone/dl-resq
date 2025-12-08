@@ -1,0 +1,90 @@
+{
+    "description": "Quantization configuration for RESQ PTQ model. Controls which modules are rotated and quantized.",
+    
+    "rotation": {
+        "enable_R1": true,
+        "enable_R2": false,
+        "enable_R3": false,
+        "enable_R4": false,
+        "custom_R4_path": null
+    },
+    
+    "quantization": {
+        "q_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true
+        },
+        "k_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true
+        },
+        "v_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true
+        },
+        "o_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true
+        },
+        "up_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true
+        },
+        "gate_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true
+        },
+        "down_proj": {
+            "enabled": true,
+            "bits": 4,
+            "groupsize": -1,
+            "asym": true,
+            "left_side_high_bits": true,
+            "left_side_bits": 16
+        },
+        "k_cache": {
+            "enabled": false,
+            "bits": 16,
+            "groupsize": -1,
+            "asym": true
+        },
+        "v_cache": {
+            "enabled": false,
+            "bits": 16,
+            "groupsize": -1,
+            "asym": true
+        },
+        "lm_head": {
+            "enabled": false,
+            "bits": 16
+        },
+        "embed_tokens": {
+            "enabled": false,
+            "bits": 16
+        }
+    },
+    
+    "mixed_precision": {
+        "high_bits": 8,
+        "low_bits": 2,
+        "high_fraction": 0.125,
+        "low_fraction": 0.0
+    },
+    
+    "online_hadamard": {
+        "down_proj": false,
+        "o_proj": false
+    }
+}

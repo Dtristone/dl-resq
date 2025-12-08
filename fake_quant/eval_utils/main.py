@@ -19,6 +19,19 @@ from utils.hadamard_utils import (
 
 
 def ptq_model(args, model, model_args=None):
+    """
+    Post-Training Quantization function.
+    
+    If args.quant_config is set, uses the configurable version that allows
+    selective control over R1/R2/R3/R4 rotations and per-module quantization.
+    Otherwise, uses the default behavior.
+    """
+    # Check if we should use configurable version
+    if hasattr(args, 'quant_config') and args.quant_config is not None:
+        from eval_utils.ptq_configurable import ptq_model_with_config
+        return ptq_model_with_config(args, model, model_args, args.quant_config)
+    
+    # Original implementation
     transformers.set_seed(args.seed)
     model.eval()
     # Rotate the weights
