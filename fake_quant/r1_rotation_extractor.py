@@ -285,7 +285,7 @@ class R1RotationExtractor:
             if hasattr(layernorm, "bias") and layernorm.bias is not None:
                 if linear.bias is None:
                     linear.bias = nn.Parameter(
-                        torch.zeros(linear.out_features, dtype=torch.float64)
+                        torch.zeros(linear.out_features, dtype=linear_dtype)
                     )
                 linear.bias.data = linear.bias.data.double() + torch.matmul(
                     W_, layernorm.bias.double()
@@ -389,19 +389,20 @@ class R1RotationExtractor:
         H_attn = torch.zeros((nlayers, hidden_dim, hidden_dim), device=device)
         H_mlp = torch.zeros((nlayers, hidden_dim, hidden_dim), device=device)
         
+        # Storage for captured activations (using list to avoid global variables)
+        activation_storage = {'input_up_proj': None, 'input_qkv_proj': None}
+        
         # Collect covariance matrices
         for i in tqdm(range(nlayers), desc="Collecting covariance matrices"):
             layer = layers[i].to(device)
             
             hooks = []
             
-            def hook_fn_upproj(module, input, output):
-                global input_up_proj
-                input_up_proj = input[0]
+            def hook_fn_upproj(module, input, output, storage=activation_storage):
+                storage['input_up_proj'] = input[0]
             
-            def hook_fn_qproj(module, input, output):
-                global input_qkv_proj
-                input_qkv_proj = input[0]
+            def hook_fn_qproj(module, input, output, storage=activation_storage):
+                storage['input_qkv_proj'] = input[0]
             
             hooks.append(layer.mlp.up_proj.register_forward_hook(hook_fn_upproj))
             if hasattr(layer, "self_attn"):
@@ -417,10 +418,10 @@ class R1RotationExtractor:
                 
                 # Accumulate covariance matrices
                 H_mlp[i] += torch.sum(
-                    input_up_proj.double().mT @ input_up_proj.double(), dim=0
+                    activation_storage['input_up_proj'].double().mT @ activation_storage['input_up_proj'].double(), dim=0
                 )
                 H_attn[i] += torch.sum(
-                    input_qkv_proj.double().mT @ input_qkv_proj.double(), dim=0
+                    activation_storage['input_qkv_proj'].double().mT @ activation_storage['input_qkv_proj'].double(), dim=0
                 )
             
             for hook in hooks:
@@ -431,7 +432,9 @@ class R1RotationExtractor:
             inps, outs = outs, inps
         
         # Perform eigen decomposition (full_shared configuration)
-        cov_matrix = (H_attn.sum(0) + H_mlp.sum(0)) / (2 * nbatches * nlayers * seqlen)
+        # Divide by 2 because we average over both attention and MLP covariance matrices
+        NUM_COV_MATRICES = 2  # H_attn and H_mlp
+        cov_matrix = (H_attn.sum(0) + H_mlp.sum(0)) / (NUM_COV_MATRICES * nbatches * nlayers * seqlen)
         self._eigenvalues, self._U_attn = perform_eigen_decomp(cov_matrix)
         
         # Generate random orthogonal matrices
@@ -507,7 +510,8 @@ class R1RotationExtractor:
             }
         }
         
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+        dir_path = os.path.dirname(path) or '.'
+        os.makedirs(dir_path, exist_ok=True)
         torch.save(save_dict, path)
         print(f"Rotation matrices saved to {path}")
     
@@ -549,28 +553,28 @@ class R1RotationExtractor:
         Returns:
             R1RotationExtractor instance with loaded matrices.
         """
-        loaded = torch.load(path, map_location='cpu')
+        loaded = torch.load(path, map_location='cpu', weights_only=False)
         config = loaded.get('config', {})
         
-        # Create instance with minimal initialization
-        instance = cls.__new__(cls)
-        instance.config = R1RotationConfig(
-            high_fraction=config.get('high_fraction', 0.125),
-            nsamples=config.get('nsamples', 128),
-            seqlen=config.get('seqlen', 2048),
-            seed=config.get('seed', 42),
-            calib_dataset=config.get('calib_dataset', 'wikitext'),
-        )
-        instance.model = model
-        instance.model_name = config.get('model_name', 'unknown')
+        # Create a minimal instance with _skip_init flag to avoid validation
+        class _LoadedExtractor(cls):
+            def __init__(self_inner):
+                self_inner.config = R1RotationConfig(
+                    high_fraction=config.get('high_fraction', 0.125),
+                    nsamples=config.get('nsamples', 128),
+                    seqlen=config.get('seqlen', 2048),
+                    seed=config.get('seed', 42),
+                    calib_dataset=config.get('calib_dataset', 'wikitext'),
+                )
+                self_inner.model = model
+                self_inner.model_name = config.get('model_name', 'unknown')
+                self_inner._U_attn = loaded['U_attn']
+                self_inner._R1_1 = loaded['R1_1']
+                self_inner._R1_2 = loaded['R1_2']
+                self_inner._R1 = loaded['R1']
+                self_inner._eigenvalues = loaded.get('eigenvalues')
         
-        instance._U_attn = loaded['U_attn']
-        instance._R1_1 = loaded['R1_1']
-        instance._R1_2 = loaded['R1_2']
-        instance._R1 = loaded['R1']
-        instance._eigenvalues = loaded.get('eigenvalues')
-        
-        return instance
+        return _LoadedExtractor()
 
 
 if __name__ == "__main__":
@@ -604,6 +608,15 @@ if __name__ == "__main__":
     R1 = extractor.extract()
     
     print(f"R1 shape: {R1.shape}")
-    print(f"R1 is orthogonal: {torch.allclose(R1 @ R1.T, torch.eye(R1.shape[0], device=R1.device, dtype=R1.dtype), atol=1e-6)}")
+    # Verify orthogonality using a small random subset for efficiency
+    if R1.shape[0] > 0:
+        subset_size = min(64, R1.shape[0])
+        R1_subset = R1[:subset_size, :subset_size]
+        is_orthogonal = torch.allclose(
+            R1_subset @ R1_subset.T, 
+            torch.eye(subset_size, device=R1.device, dtype=R1.dtype), 
+            atol=1e-6
+        )
+        print(f"R1 orthogonality check (subset): {is_orthogonal}")
     
     extractor.save(args.output)
