@@ -432,9 +432,8 @@ class R1RotationExtractor:
             inps, outs = outs, inps
         
         # Perform eigen decomposition (full_shared configuration)
-        # Divide by 2 because we average over both attention and MLP covariance matrices
-        NUM_COV_MATRICES = 2  # H_attn and H_mlp
-        cov_matrix = (H_attn.sum(0) + H_mlp.sum(0)) / (NUM_COV_MATRICES * nbatches * nlayers * seqlen)
+        # We average over both H_attn and H_mlp covariance matrices (hence dividing by 2)
+        cov_matrix = (H_attn.sum(0) + H_mlp.sum(0)) / (2 * nbatches * nlayers * seqlen)
         self._eigenvalues, self._U_attn = perform_eigen_decomp(cov_matrix)
         
         # Generate random orthogonal matrices
@@ -556,25 +555,25 @@ class R1RotationExtractor:
         loaded = torch.load(path, map_location='cpu', weights_only=False)
         config = loaded.get('config', {})
         
-        # Create a minimal instance with _skip_init flag to avoid validation
-        class _LoadedExtractor(cls):
-            def __init__(self_inner):
-                self_inner.config = R1RotationConfig(
-                    high_fraction=config.get('high_fraction', 0.125),
-                    nsamples=config.get('nsamples', 128),
-                    seqlen=config.get('seqlen', 2048),
-                    seed=config.get('seed', 42),
-                    calib_dataset=config.get('calib_dataset', 'wikitext'),
-                )
-                self_inner.model = model
-                self_inner.model_name = config.get('model_name', 'unknown')
-                self_inner._U_attn = loaded['U_attn']
-                self_inner._R1_1 = loaded['R1_1']
-                self_inner._R1_2 = loaded['R1_2']
-                self_inner._R1 = loaded['R1']
-                self_inner._eigenvalues = loaded.get('eigenvalues')
+        # Create instance using object.__new__ and initialize attributes directly
+        # This bypasses the normal __init__ which requires a model
+        instance = object.__new__(cls)
+        instance.config = R1RotationConfig(
+            high_fraction=config.get('high_fraction', 0.125),
+            nsamples=config.get('nsamples', 128),
+            seqlen=config.get('seqlen', 2048),
+            seed=config.get('seed', 42),
+            calib_dataset=config.get('calib_dataset', 'wikitext'),
+        )
+        instance.model = model
+        instance.model_name = config.get('model_name', 'unknown')
+        instance._U_attn = loaded['U_attn']
+        instance._R1_1 = loaded['R1_1']
+        instance._R1_2 = loaded['R1_2']
+        instance._R1 = loaded['R1']
+        instance._eigenvalues = loaded.get('eigenvalues')
         
-        return _LoadedExtractor()
+        return instance
 
 
 if __name__ == "__main__":
