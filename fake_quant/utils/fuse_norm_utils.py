@@ -101,16 +101,16 @@ def fuse_layer_norms(model):
     
     2. **Embeddings are rotated**: W_embed_rotated = W_embed @ R1
     
-    3. **basis_change_1 is set to learned rotation**: In fuse_basis_to_model(), the first
+    3. **basis_change_1 is set to learned transformation**: In fuse_basis_to_model(), the first
        layer's basis_change_1 is initialized with torch.eye() but then replaced with
-       U_mlp.T @ U_attn, which is a learned orthogonal transformation
+       U_mlp.T @ U_attn, which is a learned transformation (product of orthogonal matrices)
     
     4. **The rotation matrices (R1, U_mlp, U_attn) are optimized** to minimize reconstruction
        error, which implicitly learns to compensate for the mean-centered embeddings
     
-    So the answer is: YES, ResQ compensates for the mean subtraction through the optimized
-    rotation matrices (R1, basis_change_1, etc.) that are learned during the rotation
-    optimization phase. The system learns rotations that work well with mean-centered inputs.
+    **Summary**: ResQ compensates for the mean subtraction through optimized rotation matrices
+    (R1, basis_change_1, etc.) that are learned during the rotation optimization phase.
+    The system learns transformations that work well with mean-centered inputs.
     
     Important Considerations:
     -------------------------
