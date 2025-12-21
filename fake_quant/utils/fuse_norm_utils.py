@@ -93,10 +93,30 @@ def fuse_layer_norms(model):
     4. **Activation Distribution**: Helps ensure the first layer receives inputs with more
        stable statistics, reducing activation outliers throughout the network
     
+    How the mean subtraction is compensated (canceling mechanism):
+    -------------------------------------------------------------
+    The model DOES compensate for this distribution shift through the rotation pipeline:
+    
+    1. **Embeddings are mean-centered**: W_embed = W_embed - mean(W_embed)
+    
+    2. **Embeddings are rotated**: W_embed_rotated = W_embed @ R1
+    
+    3. **basis_change_1 is set to learned rotation**: In fuse_basis_to_model(), the first
+       layer's basis_change_1 is initialized with torch.eye() but then replaced with
+       U_mlp.T @ U_attn, which is a learned orthogonal transformation
+    
+    4. **The rotation matrices (R1, U_mlp, U_attn) are optimized** to minimize reconstruction
+       error, which implicitly learns to compensate for the mean-centered embeddings
+    
+    So the answer is: YES, ResQ compensates for the mean subtraction through the optimized
+    rotation matrices (R1, basis_change_1, etc.) that are learned during the rotation
+    optimization phase. The system learns rotations that work well with mean-centered inputs.
+    
     Important Considerations:
     -------------------------
     - This changes the embedding distribution from what the model was trained on
-    - The first layer (basis_change_1 + input_layernorm) must be able to adapt to this change
+    - The rotation optimization (via fuse_basis_to_model) adapts to this changed distribution
+    - The learned basis_change transformations provide the compensating mechanism
     - Since we're doing post-training quantization (PTQ), this is an approximation that
       trades off perfect fidelity for better quantization robustness
     - Empirically, this appears to help more than it hurts for the quantization task
@@ -106,6 +126,16 @@ def fuse_layer_norms(model):
     - Could skip mean subtraction and rely only on rotation + quantization
     - Could absorb mean subtraction into the first layer's basis_change_1 linear layer
     - Could use learned affine parameters to compensate for the distribution shift
+    
+    Key Insight:
+    -----------
+    The mean subtraction CAN be used because:
+    1. It's applied BEFORE rotation (rotate_embeddings applies R1 AFTER mean centering)
+    2. The rotation matrices (R1, U_mlp, U_attn) are optimized on calibration data
+    3. The optimization implicitly learns rotations that work with mean-centered inputs
+    4. The basis_change_1 transformation provides additional adaptation capacity
+    5. The entire pipeline (mean-center → rotate → basis_change → norm → attention) is
+       optimized jointly to minimize reconstruction error on calibration data
     """
     kwargs = {"model": model}
 
