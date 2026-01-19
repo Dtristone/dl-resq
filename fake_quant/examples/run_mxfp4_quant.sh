@@ -1,3 +1,4 @@
+#!/bin/bash
 # MXFP4 Quantization Evaluation Script
 
 torchrun --nnodes=1 --nproc_per_node=1 ptq.py \

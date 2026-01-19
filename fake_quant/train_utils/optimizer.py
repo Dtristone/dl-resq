@@ -176,8 +176,8 @@ class SGDG(Optimizer):
                     try:
                         if weight_decay != 0:
                             #  defined.
-                            d_p.add_(weight_decay, p.data)
-                    except:
+                            d_p.add_(p.data, alpha=weight_decay)
+                    except (TypeError, AttributeError):
                         pass
                     if momentum != 0:
                         param_state = self.state[p]
