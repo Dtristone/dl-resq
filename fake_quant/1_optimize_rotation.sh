@@ -1,3 +1,4 @@
+#!/bin/bash
 # coding=utf-8
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
@@ -40,5 +41,5 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24544 optimize_rotation.py 
 --gradient_checkpointing True \
 --save_safetensors False \
 --logging_steps 1 \
---weight_decay 0. \
+--weight_decay 0.
 

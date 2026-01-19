@@ -1,3 +1,4 @@
+#!/bin/bash
 # coding=utf-8
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
@@ -32,4 +33,4 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24544 ptq.py \
 --optimized_basis_path ./rotation/U-wikitext-512-Llama-3.2-1B.bin \
 --rotation_granularity 'full_shared' \
 --rotate \
---tasks "mmlu,boolq,piqa,social_iqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa" \
+--tasks "mmlu,boolq,piqa,social_iqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa"

@@ -1,3 +1,4 @@
+#!/bin/bash
 # coding=utf-8
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
@@ -16,4 +17,4 @@ python get_basis.py \
 --rotate_mode "resq" \
 --nsamples 512 \
 --calib_dataset "wikitext" \
---sparse_fraction 0.0 \
+--sparse_fraction 0.0

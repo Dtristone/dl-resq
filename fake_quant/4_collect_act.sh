@@ -1,3 +1,4 @@
+#!/bin/bash
 # coding=utf-8
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
@@ -31,4 +32,4 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=24556 collect_activations.p
 --output_dir "output/" \
 --rotate_mode 'none' \
 --rotation_granularity 'full_shared' \
---layerwise_shapiro \
+--layerwise_shapiro
